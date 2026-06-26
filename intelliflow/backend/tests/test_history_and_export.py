@@ -16,7 +16,13 @@ def _seed_doc(idx: int) -> dict:
             "flow_name": f"Flow {idx}",
             "description": "seed",
             "components": [
-                {"id": "c1", "type": "HTTPS Sender", "config": {}, "purpose": "in"},
+                {
+                    "id": "c1",
+                    "type": "HTTPS Sender",
+                    "config": {},
+                    "purpose": "in",
+                    "citations": [{"source": "sap_cpi_components/https_sender.md", "chunk_id": "0001"}],
+                },
             ],
             "connections": [],
             "xml_request": "<r/>",
@@ -58,14 +64,27 @@ async def test_get_flow_404(patched_app):
     assert resp.status_code == 404
 
 
-async def test_export_pdf_returns_501(patched_app, fake_flows):
+async def test_export_xml_returns_501(patched_app, fake_flows):
+    fake_flows.docs["flow-001"] = _seed_doc(1)
+
+    transport = ASGITransport(app=patched_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/api/v1/iflow/flow-001/export?format=xml")
+
+    assert resp.status_code == 501
+
+
+async def test_export_pdf_streams_pdf(patched_app, fake_flows):
     fake_flows.docs["flow-001"] = _seed_doc(1)
 
     transport = ASGITransport(app=patched_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/v1/iflow/flow-001/export?format=pdf")
 
-    assert resp.status_code == 501
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/pdf")
+    assert resp.content[:4] == b"%PDF"
+    assert "attachment" in resp.headers["content-disposition"]
 
 
 async def test_export_json_returns_attachment(patched_app, fake_flows):

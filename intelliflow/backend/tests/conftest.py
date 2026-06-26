@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,12 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("MONGODB_URI", "mongodb://localhost:27017")
 os.environ.setdefault("LLM_MODEL", "gpt-4-turbo-test")
+os.environ.setdefault("LLM_FALLBACK_MODEL", "claude-sonnet-4-6-test")
+os.environ.setdefault("LLM_REWRITER_MODEL", "claude-haiku-4-5-test")
+os.environ.setdefault("CHROMA_PERSIST_DIR", str(Path(tempfile.gettempdir()) / "intelliflow_test_chroma"))
 
 
 class FakeFlowsCollection:
@@ -104,10 +109,15 @@ def fake_flows():
 
 @pytest.fixture
 def patched_app(monkeypatch, fake_flows):
-    """Build a FastAPI app with the flows collection swapped for the in-memory fake."""
+    """Build a FastAPI app with the flows collection swapped for the in-memory fake.
+
+    Also disables the slowapi rate limiter so test runs don't trip the 10/min cap when
+    the test file calls /generate repeatedly.
+    """
 
     from app import db as db_module
     from app.routers import iflow as iflow_router
+    from app.services.limiter import limiter
 
     async def noop_ensure_indexes() -> None:
         return None
@@ -120,9 +130,8 @@ def patched_app(monkeypatch, fake_flows):
     monkeypatch.setattr(db_module, "flows_collection", lambda: fake_flows)
     monkeypatch.setattr(iflow_router, "flows_collection", lambda: fake_flows)
 
-    iflow_router.get_rate_limiter().reset()
+    limiter.enabled = False
 
-    # Import after patching so any module-level captures resolve through monkeypatch where needed.
     from app.main import app
 
     return app

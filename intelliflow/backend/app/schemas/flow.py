@@ -6,11 +6,17 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class Citation(BaseModel):
+    source: str = Field(..., min_length=1)
+    chunk_id: str = Field(..., min_length=1)
+
+
 class Component(BaseModel):
     id: str
     type: str
     config: dict[str, Any] = Field(default_factory=dict)
     purpose: str
+    citations: list[Citation] = Field(..., min_length=1)
 
 
 class Connection(BaseModel):
