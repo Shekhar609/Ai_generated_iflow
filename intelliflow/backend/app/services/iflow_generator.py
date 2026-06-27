@@ -63,7 +63,11 @@ _anthropic_client: AsyncAnthropic | None = None
 def _openai() -> AsyncOpenAI:
     global _openai_client
     if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=get_settings().openai_api_key)
+        settings = get_settings()
+        _openai_client = AsyncOpenAI(
+            api_key=settings.llm_api_key(),
+            base_url=settings.llm_base_url,
+        )
     return _openai_client
 
 

@@ -41,6 +41,7 @@ def set_request_id(rid: str | None) -> None:
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"gsk_[A-Za-z0-9_\-]{8,}"),
 ]
 
 

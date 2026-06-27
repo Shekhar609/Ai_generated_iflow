@@ -30,7 +30,10 @@ def get_openai_client() -> AsyncOpenAI:
     global _client
     if _client is None:
         settings = get_settings()
-        _client = AsyncOpenAI(api_key=settings.openai_api_key)
+        _client = AsyncOpenAI(
+            api_key=settings.llm_api_key(),
+            base_url=settings.llm_base_url,
+        )
     return _client
 
 

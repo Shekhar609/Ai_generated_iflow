@@ -10,8 +10,9 @@ validators, XSD validation, AI Error Fixer, and PDF export. No auth, no frontend
 
 - Python **3.11**
 - A local MongoDB running at `mongodb://localhost:27017`
-- An OpenAI API key (generator + embeddings)
-- An Anthropic API key (query rewriter, optional — falls back to identity)
+- A Groq API key (primary generator — `llama3-70b-8192` via Groq's OpenAI-compatible API)
+- An OpenAI API key (embeddings; Groq does not offer embeddings)
+- An Anthropic API key (query rewriter + fallback generator, optional — falls back to identity)
 - Optional: Graphviz `dot` binary on `PATH` for diagram rendering in PDF export
 
 ## Install
@@ -36,8 +37,10 @@ Copy `.env.example` to `.env` and fill in your keys. Key settings:
 ```
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
+GROQ_API_KEY=gsk_...
 MONGODB_URI=mongodb://localhost:27017
-LLM_MODEL=gpt-4-turbo
+LLM_MODEL=llama3-70b-8192
+LLM_BASE_URL=https://api.groq.com/openai/v1
 LLM_FALLBACK_MODEL=claude-sonnet-4-6
 LLM_REWRITER_MODEL=claude-haiku-4-5
 EMBEDDING_MODEL=text-embedding-3-small
