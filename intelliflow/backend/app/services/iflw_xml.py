@@ -106,17 +106,24 @@ def _is_router(t: str) -> bool:
     return t == ROUTER_TYPE
 
 
-# ---------- id sanitization ----------------------------------------------------------
+# ---------- id allocation (SAP CPI convention: <TypeName>_<N>) -----------------------
 
-_BPMN_ID_RE = re.compile(r"[^A-Za-z0-9_]")
+class _IdAllocator:
+    """Hand out BPMN ids of the form `<TypeName>_<incrementingNumber>`.
 
+    SAP CPI's serializer emits ids like `Participant_2`, `StartEvent_3`,
+    `ServiceTask_7`, `SequenceFlow_12` — the type name is fixed and only the
+    counter at the end advances as elements are added. Web IDE round-trips these
+    cleanly; descriptive ids (e.g. `Task_content_modifier`) tend to be renamed
+    or rejected on import. One counter per type, both starting at 1.
+    """
 
-def _bpmn_id(prefix: str, raw: str) -> str:
-    """Return a BPMN-id-safe string. BPMN ids must match NCName rules."""
-    cleaned = _BPMN_ID_RE.sub("_", raw).strip("_")
-    if not cleaned or not cleaned[0].isalpha():
-        cleaned = f"x_{cleaned}" if cleaned else "x"
-    return f"{prefix}_{cleaned}"
+    def __init__(self) -> None:
+        self._counters: dict[str, int] = defaultdict(int)
+
+    def next(self, type_name: str) -> str:
+        self._counters[type_name] += 1
+        return f"{type_name}_{self._counters[type_name]}"
 
 
 # ---------- layout (simple levelized grid) -------------------------------------------
@@ -196,57 +203,58 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
     receivers = [c for c in components if _is_receiver(c.type)]
     orchestration = [c for c in components if not (_is_sender(c.type) or _is_receiver(c.type))]
 
-    # ---- id allocation --------------------------------------------------------------
+    # ---- id allocation (SAP CPI <Type>_<N> convention) -----------------------------
+    # Allocation order is deterministic so the resulting numbering is stable:
+    #   1. Participants  — senders, then IntegrationProcess, then receivers
+    #   2. In-process    — start events, orchestration nodes, receiver service tasks, end events
+    #   3. SequenceFlows — in connection order, then one per receiver→end edge
+    #   4. MessageFlows  — per sender, then per receiver
+    # MessageEventDefinitions are allocated alongside their owning start/end event.
 
+    ids = _IdAllocator()
     process_id = "Process_1"
-    process_participant_id = "Participant_Process_1"
 
-    start_event_for_sender: dict[str, str] = {}
-    receiver_task_for_id: dict[str, str] = {}
-    end_event_for_receiver: dict[str, str] = {}
-    participant_for_sender: dict[str, str] = {}
-    participant_for_receiver: dict[str, str] = {}
-    node_for_orch: dict[str, str] = {}
+    participant_for_sender = {c.id: ids.next("Participant") for c in senders}
+    process_participant_id = ids.next("Participant")
+    participant_for_receiver = {c.id: ids.next("Participant") for c in receivers}
 
-    for c in senders:
-        participant_for_sender[c.id] = _bpmn_id("Participant_Sender", c.id)
-        start_event_for_sender[c.id] = _bpmn_id("StartEvent", c.id)
-    for c in receivers:
-        participant_for_receiver[c.id] = _bpmn_id("Participant_Receiver", c.id)
-        receiver_task_for_id[c.id] = _bpmn_id("ServiceTask_Receiver", c.id)
-        end_event_for_receiver[c.id] = _bpmn_id("EndEvent", c.id)
-    for c in orchestration:
-        node_for_orch[c.id] = _bpmn_id(
-            "ExclusiveGateway" if _is_router(c.type) else "Task", c.id
-        )
+    start_event_for_sender = {c.id: ids.next("StartEvent") for c in senders}
+    node_for_orch = {
+        c.id: ids.next("ExclusiveGateway" if _is_router(c.type) else "ServiceTask")
+        for c in orchestration
+    }
+    receiver_task_for_id = {c.id: ids.next("ServiceTask") for c in receivers}
+    end_event_for_receiver = {c.id: ids.next("EndEvent") for c in receivers}
 
     # A single component_id → in-process BPMN element id. For senders, this is the
     # StartEvent (they enter the process via that event). For everything else, it's
     # the task / gateway / receiver service task.
     in_process_id: dict[str, str] = {}
     in_process_id.update(start_event_for_sender)
-    in_process_id.update(receiver_task_for_id)
     in_process_id.update(node_for_orch)
+    in_process_id.update(receiver_task_for_id)
 
     # ---- sequence flow ids (one per in-process connection + one per receiver→end) ---
 
     seq_flow_for_conn: list[tuple[str, str, str, str | None]] = []  # (sf_id, src, tgt, label)
-    seen_pairs: dict[tuple[str, str], int] = defaultdict(int)
     for cn in connections:
         src = in_process_id.get(cn.from_)
         tgt = in_process_id.get(cn.to)
         if not src or not tgt:
             continue
-        key = (src, tgt)
-        seen_pairs[key] += 1
-        sf_id = f"SequenceFlow_{src}_{tgt}" if seen_pairs[key] == 1 else f"SequenceFlow_{src}_{tgt}_{seen_pairs[key]}"
-        seq_flow_for_conn.append((sf_id, src, tgt, cn.label))
+        seq_flow_for_conn.append((ids.next("SequenceFlow"), src, tgt, cn.label))
 
     # Receiver service task → its end event sequence flow.
     end_seq_flows: list[tuple[str, str, str]] = []  # (sf_id, src, tgt)
     for c in receivers:
-        sf_id = _bpmn_id("SequenceFlow_End", c.id)
-        end_seq_flows.append((sf_id, receiver_task_for_id[c.id], end_event_for_receiver[c.id]))
+        end_seq_flows.append((
+            ids.next("SequenceFlow"),
+            receiver_task_for_id[c.id],
+            end_event_for_receiver[c.id],
+        ))
+
+    message_flow_for_sender = {c.id: ids.next("MessageFlow") for c in senders}
+    message_flow_for_receiver = {c.id: ids.next("MessageFlow") for c in receivers}
 
     # ---- incoming/outgoing per in-process node --------------------------------------
 
@@ -311,7 +319,7 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         mf = etree.SubElement(
             collab,
             _q("bpmn2", "messageFlow"),
-            id=_bpmn_id("MessageFlow_Sender", c.id),
+            id=message_flow_for_sender[c.id],
             sourceRef=participant_for_sender[c.id],
             targetRef=start_event_for_sender[c.id],
         )
@@ -330,7 +338,7 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         mf = etree.SubElement(
             collab,
             _q("bpmn2", "messageFlow"),
-            id=_bpmn_id("MessageFlow_Receiver", c.id),
+            id=message_flow_for_receiver[c.id],
             sourceRef=receiver_task_for_id[c.id],
             targetRef=participant_for_receiver[c.id],
         )
@@ -358,7 +366,7 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         se = etree.SubElement(process, _q("bpmn2", "startEvent"), id=sid, name="Start")
         _props(se, [("componentVersion", "1.0")])
         _add_incoming_outgoing(se, incoming_by_node.get(sid, []), outgoing_by_node.get(sid, []))
-        etree.SubElement(se, _q("bpmn2", "messageEventDefinition"), id=_bpmn_id("MED_Start", c.id))
+        etree.SubElement(se, _q("bpmn2", "messageEventDefinition"), id=ids.next("MessageEventDefinition"))
 
     # Orchestration nodes
     for c in orchestration:
@@ -392,7 +400,7 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         ee = etree.SubElement(process, _q("bpmn2", "endEvent"), id=eid, name="End")
         _props(ee, [("componentVersion", "1.0")])
         _add_incoming_outgoing(ee, incoming_by_node.get(eid, []), outgoing_by_node.get(eid, []))
-        etree.SubElement(ee, _q("bpmn2", "messageEventDefinition"), id=_bpmn_id("MED_End", c.id))
+        etree.SubElement(ee, _q("bpmn2", "messageEventDefinition"), id=ids.next("MessageEventDefinition"))
 
     # Sequence flows
     for sf_id, src, tgt, label in seq_flow_for_conn:
@@ -435,19 +443,19 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
     process_height = max(300, max_siblings * (NODE_H + BRANCH_GAP) + 100)
 
     # Process participant pool (encompasses all in-process shapes)
-    pool = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=f"{process_participant_id}_di", bpmnElement=process_participant_id, isHorizontal="true")
+    pool = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=ids.next("BPMNShape"), bpmnElement=process_participant_id, isHorizontal="true")
     etree.SubElement(pool, _q("dc", "Bounds"), x=str(PROCESS_X), y=str(PROCESS_Y), width=str(process_width), height=str(process_height))
 
     # Sender participants (left of pool, stacked)
     for idx, c in enumerate(senders):
         y = PROCESS_Y + idx * (NODE_H + BRANCH_GAP)
-        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=f"{participant_for_sender[c.id]}_di", bpmnElement=participant_for_sender[c.id], isHorizontal="true")
+        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=ids.next("BPMNShape"), bpmnElement=participant_for_sender[c.id], isHorizontal="true")
         etree.SubElement(shape, _q("dc", "Bounds"), x="40", y=str(y), width="160", height="80")
 
     # In-process shapes
     def _shape_for_component(c: Component, x: int, y: int) -> None:
         nid = in_process_id[c.id]
-        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=f"{nid}_di", bpmnElement=nid)
+        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=ids.next("BPMNShape"), bpmnElement=nid)
         if _is_sender(c.type):
             # represented as a start event circle (smaller)
             etree.SubElement(shape, _q("dc", "Bounds"), x=str(x), y=str(y + 20), width="40", height="40")
@@ -472,14 +480,14 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         x = inside_x_origin + (lvl + 1) * LEVEL_W
         y = inside_y_origin + sib * (NODE_H + BRANCH_GAP)
         eid = end_event_for_receiver[c.id]
-        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=f"{eid}_di", bpmnElement=eid)
+        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=ids.next("BPMNShape"), bpmnElement=eid)
         etree.SubElement(shape, _q("dc", "Bounds"), x=str(x), y=str(y + 20), width="40", height="40")
 
     # Receiver participants (right of pool, stacked)
     receiver_pool_x = PROCESS_X + process_width + 40
     for idx, c in enumerate(receivers):
         y = PROCESS_Y + idx * (NODE_H + BRANCH_GAP)
-        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=f"{participant_for_receiver[c.id]}_di", bpmnElement=participant_for_receiver[c.id], isHorizontal="true")
+        shape = etree.SubElement(plane, _q("bpmndi", "BPMNShape"), id=ids.next("BPMNShape"), bpmnElement=participant_for_receiver[c.id], isHorizontal="true")
         etree.SubElement(shape, _q("dc", "Bounds"), x=str(receiver_pool_x), y=str(y), width="160", height="80")
 
     # Sequence flow edges (straight lines, source-center → target-center; rough)
@@ -505,13 +513,13 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         return 0, 0
 
     for sf_id, src, tgt, _label in seq_flow_for_conn:
-        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=f"{sf_id}_di", bpmnElement=sf_id)
+        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=ids.next("BPMNEdge"), bpmnElement=sf_id)
         sx, sy = _center_for(src)
         tx, ty = _center_for(tgt)
         etree.SubElement(edge, _q("di", "waypoint"), x=str(sx), y=str(sy))
         etree.SubElement(edge, _q("di", "waypoint"), x=str(tx), y=str(ty))
     for sf_id, src, tgt in end_seq_flows:
-        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=f"{sf_id}_di", bpmnElement=sf_id)
+        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=ids.next("BPMNEdge"), bpmnElement=sf_id)
         sx, sy = _center_for(src)
         tx, ty = _center_for(tgt)
         etree.SubElement(edge, _q("di", "waypoint"), x=str(sx), y=str(sy))
@@ -519,8 +527,7 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
 
     # Message flow edges
     for c in senders:
-        mf_id = _bpmn_id("MessageFlow_Sender", c.id)
-        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=f"{mf_id}_di", bpmnElement=mf_id)
+        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=ids.next("BPMNEdge"), bpmnElement=message_flow_for_sender[c.id])
         # participant right edge → start event left
         idx = senders.index(c)
         py = PROCESS_Y + idx * (NODE_H + BRANCH_GAP) + 40
@@ -528,8 +535,7 @@ def build_iflw_xml(iflow: IFlow, *, pretty: bool = True) -> bytes:
         etree.SubElement(edge, _q("di", "waypoint"), x="200", y=str(py))
         etree.SubElement(edge, _q("di", "waypoint"), x=str(tx), y=str(ty))
     for c in receivers:
-        mf_id = _bpmn_id("MessageFlow_Receiver", c.id)
-        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=f"{mf_id}_di", bpmnElement=mf_id)
+        edge = etree.SubElement(plane, _q("bpmndi", "BPMNEdge"), id=ids.next("BPMNEdge"), bpmnElement=message_flow_for_receiver[c.id])
         sx, sy = _center_for(receiver_task_for_id[c.id])
         idx = receivers.index(c)
         py = PROCESS_Y + idx * (NODE_H + BRANCH_GAP) + 40

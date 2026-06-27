@@ -102,15 +102,63 @@ def test_iflw_xml_router_branches_carry_their_label_as_condition():
         assert cond.text == sf.get("name")
 
 
-def test_iflw_xml_includes_bpmndi_with_shape_per_endpoint():
+def test_iflw_xml_includes_bpmndi_referencing_every_bpmn_element():
     root = _parse(build_iflw_xml(_country_routing_flow()))
     plane = root.find(f"{{{NS['bpmndi']}}}BPMNDiagram/{{{NS['bpmndi']}}}BPMNPlane")
     assert plane is not None
+
+    # Every BPMNDI shape/edge must reference a real BPMN element id from the
+    # collaboration or the process.
+    all_bpmn_ids = {
+        el.get("id")
+        for el in root.iter()
+        if el.tag in {
+            f"{{{NS['bpmn2']}}}participant",
+            f"{{{NS['bpmn2']}}}startEvent",
+            f"{{{NS['bpmn2']}}}endEvent",
+            f"{{{NS['bpmn2']}}}serviceTask",
+            f"{{{NS['bpmn2']}}}exclusiveGateway",
+            f"{{{NS['bpmn2']}}}sequenceFlow",
+            f"{{{NS['bpmn2']}}}messageFlow",
+        }
+    }
     shape_refs = {s.get("bpmnElement") for s in plane.findall(f"{{{NS['bpmndi']}}}BPMNShape")}
-    # Pool + 1 sender participant + 3 receiver participants are all referenced
-    assert "Participant_Process_1" in shape_refs
-    assert any(r.startswith("Participant_Sender_") for r in shape_refs)
-    assert sum(1 for r in shape_refs if r.startswith("Participant_Receiver_")) == 3
+    edge_refs = {e.get("bpmnElement") for e in plane.findall(f"{{{NS['bpmndi']}}}BPMNEdge")}
+    assert shape_refs <= all_bpmn_ids
+    assert edge_refs <= all_bpmn_ids
+    # All five participants get a shape (1 sender + 1 process + 3 receivers).
+    participant_refs_in_di = {
+        s.get("bpmnElement")
+        for s in plane.findall(f"{{{NS['bpmndi']}}}BPMNShape")
+        if s.get("bpmnElement", "").startswith("Participant_")
+    }
+    assert len(participant_refs_in_di) == 5
+
+
+def test_iflw_xml_ids_follow_cpi_typename_underscore_number_convention():
+    """SAP CPI's serializer uses <TypeName>_<N> ids (Participant_2, StartEvent_3, ...).
+    Web IDE round-trips these cleanly; descriptive ids tend to be renamed."""
+    import re as _re
+    root = _parse(build_iflw_xml(_country_routing_flow()))
+    pat = _re.compile(r"^[A-Za-z]+_\d+$")
+    for tag in (
+        "participant", "startEvent", "endEvent", "serviceTask",
+        "exclusiveGateway", "sequenceFlow", "messageFlow", "messageEventDefinition",
+    ):
+        for el in root.iter(f"{{{NS['bpmn2']}}}{tag}"):
+            assert pat.match(el.get("id")), f"{tag} id {el.get('id')!r} does not match <Type>_<N>"
+    plane = root.find(f"{{{NS['bpmndi']}}}BPMNDiagram/{{{NS['bpmndi']}}}BPMNPlane")
+    for el in plane.findall(f"{{{NS['bpmndi']}}}BPMNShape") + plane.findall(f"{{{NS['bpmndi']}}}BPMNEdge"):
+        assert pat.match(el.get("id")), f"BPMNDI id {el.get('id')!r} does not match <Type>_<N>"
+
+
+def test_iflw_xml_per_type_counters_are_independent_and_start_at_1():
+    """Participant_1 and StartEvent_1 should coexist (separate counters per type)."""
+    root = _parse(build_iflw_xml(_country_routing_flow()))
+    p_ids = sorted(int(p.get("id").split("_")[1]) for p in root.findall(f".//{{{NS['bpmn2']}}}participant"))
+    se_ids = sorted(int(p.get("id").split("_")[1]) for p in root.findall(f".//{{{NS['bpmn2']}}}startEvent"))
+    assert p_ids == [1, 2, 3, 4, 5]  # 1 sender + 1 process + 3 receivers
+    assert se_ids == [1]               # only one sender → one start event
 
 
 def test_iflw_xml_safe_for_ids_with_spaces_and_punctuation():
