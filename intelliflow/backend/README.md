@@ -10,9 +10,9 @@ validators, XSD validation, AI Error Fixer, and PDF export. No auth, no frontend
 
 - Python **3.11**
 - A local MongoDB running at `mongodb://localhost:27017`
-- A Groq API key (primary generator — `llama3-70b-8192` via Groq's OpenAI-compatible API)
-- An OpenAI API key (embeddings; Groq does not offer embeddings)
+- A Groq API key (primary generator — `llama-3.3-70b-versatile` via Groq's OpenAI-compatible API)
 - An Anthropic API key (query rewriter + fallback generator, optional — falls back to identity)
+- Embeddings run locally via `sentence-transformers` (`BAAI/bge-small-en-v1.5`, ~130 MB downloaded on first call to `~/.cache/huggingface/`). No OpenAI key needed.
 - Optional: Graphviz `dot` binary on `PATH` for diagram rendering in PDF export
 
 ## Install
@@ -26,9 +26,11 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -e ".[dev]"
-# Optional: pin the cross-encoder reranker (~280MB on first call)
-pip install -e ".[reranker]"
 ```
+
+`sentence-transformers` is now a hard dependency (used by both the embedder
+and the optional cross-encoder reranker). Models are downloaded on first
+use into `~/.cache/huggingface/`.
 
 ## Environment variables
 
@@ -39,11 +41,11 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 GROQ_API_KEY=gsk_...
 MONGODB_URI=mongodb://localhost:27017
-LLM_MODEL=llama3-70b-8192
+LLM_MODEL=llama-3.3-70b-versatile
 LLM_BASE_URL=https://api.groq.com/openai/v1
 LLM_FALLBACK_MODEL=claude-sonnet-4-6
 LLM_REWRITER_MODEL=claude-haiku-4-5
-EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 RERANKER_MODEL=BAAI/bge-reranker-base
 RAG_GENERATOR_INPUT_TOKEN_CAP=15000
 CHROMA_PERSIST_DIR=./.chroma

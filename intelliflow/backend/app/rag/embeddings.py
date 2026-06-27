@@ -1,12 +1,16 @@
-"""OpenAI embedding client with an LRU+TTL cache."""
+"""Local sentence-transformers embedding client with an LRU+TTL cache.
+
+Default model is `BAAI/bge-small-en-v1.5` (384-dim, ~130 MB, CPU-friendly).
+Model is lazy-loaded on first call. Vectors are L2-normalized so cosine
+similarity in Chroma matches dot-product.
+"""
 from __future__ import annotations
 
 import asyncio
 import hashlib
-from typing import Sequence
+from typing import Any, Sequence
 
 from cachetools import TTLCache
-from openai import AsyncOpenAI, OpenAI
 
 from ..config import get_settings
 from ..services.tracing import timed_step
@@ -14,33 +18,26 @@ from ..services.tracing import timed_step
 _lru: TTLCache[str, list[float]] = TTLCache(maxsize=1000, ttl=3600)
 _lock = asyncio.Lock()
 
-_async_client: AsyncOpenAI | None = None
-_sync_client: OpenAI | None = None
+_model: Any | None = None
 
 
-def _async_client_factory() -> AsyncOpenAI:
-    global _async_client
-    if _async_client is None:
-        _async_client = AsyncOpenAI(api_key=get_settings().openai_api_key)
-    return _async_client
+def _model_factory() -> Any:
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
 
-
-def _sync_client_factory() -> OpenAI:
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = OpenAI(api_key=get_settings().openai_api_key)
-    return _sync_client
+        name = get_settings().embedding_model
+        _model = SentenceTransformer(name)
+    return _model
 
 
 def reset_clients() -> None:
-    global _async_client, _sync_client
-    _async_client = None
-    _sync_client = None
+    global _model
+    _model = None
 
 
 def _key(text: str, model: str) -> str:
-    h = hashlib.sha256(f"{model}::{text}".encode("utf-8")).hexdigest()
-    return h
+    return hashlib.sha256(f"{model}::{text}".encode("utf-8")).hexdigest()
 
 
 def cache_stats() -> dict:
@@ -51,20 +48,25 @@ def clear_cache() -> None:
     _lru.clear()
 
 
+def _encode(texts: Sequence[str]) -> list[list[float]]:
+    model = _model_factory()
+    vecs = model.encode(list(texts), normalize_embeddings=True, convert_to_numpy=True)
+    return [v.tolist() for v in vecs]
+
+
 async def embed_query(text: str, *, model: str | None = None) -> list[float]:
     settings = get_settings()
-    model = model or settings.embedding_model
-    cache_key = _key(text, model)
+    model_name = model or settings.embedding_model
+    cache_key = _key(text, model_name)
     if cache_key in _lru:
         return _lru[cache_key]
 
     async with _lock:
         if cache_key in _lru:
             return _lru[cache_key]
-        client = _async_client_factory()
-        with timed_step("embed_query", model=model, chars=len(text)):
-            resp = await client.embeddings.create(model=model, input=text)
-        vec = resp.data[0].embedding
+        with timed_step("embed_query", model=model_name, chars=len(text)):
+            vecs = await asyncio.to_thread(_encode, [text])
+        vec = vecs[0]
         _lru[cache_key] = vec
         return vec
 
@@ -72,8 +74,6 @@ async def embed_query(text: str, *, model: str | None = None) -> list[float]:
 def embed_batch_sync(texts: Sequence[str], *, model: str | None = None) -> list[list[float]]:
     """Sync batch embedding used by the ingest CLI. Bypasses LRU."""
     settings = get_settings()
-    model = model or settings.embedding_model
-    client = _sync_client_factory()
-    with timed_step("embed_batch", model=model, count=len(texts)):
-        resp = client.embeddings.create(model=model, input=list(texts))
-    return [d.embedding for d in resp.data]
+    model_name = model or settings.embedding_model
+    with timed_step("embed_batch", model=model_name, count=len(texts)):
+        return _encode(texts)

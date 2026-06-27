@@ -13,14 +13,14 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(default="mongodb://localhost:27017", validation_alias="MONGODB_URI")
     mongodb_db_name: str = Field(default="intelliflow", validation_alias="MONGODB_DB_NAME")
 
-    llm_model: str = Field(default="llama3-70b-8192", validation_alias="LLM_MODEL")
+    llm_model: str = Field(default="llama-3.3-70b-versatile", validation_alias="LLM_MODEL")
     llm_fallback_model: str = Field(default="claude-sonnet-4-6", validation_alias="LLM_FALLBACK_MODEL")
     llm_rewriter_model: str = Field(default="claude-haiku-4-5", validation_alias="LLM_REWRITER_MODEL")
     llm_base_url: str = Field(
         default="https://api.groq.com/openai/v1", validation_alias="LLM_BASE_URL"
     )
 
-    embedding_model: str = Field(default="text-embedding-3-small", validation_alias="EMBEDDING_MODEL")
+    embedding_model: str = Field(default="BAAI/bge-small-en-v1.5", validation_alias="EMBEDDING_MODEL")
     reranker_model: str = Field(default="BAAI/bge-reranker-base", validation_alias="RERANKER_MODEL")
     rag_generator_input_token_cap: int = Field(default=15000, validation_alias="RAG_GENERATOR_INPUT_TOKEN_CAP")
 
