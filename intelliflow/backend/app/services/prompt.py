@@ -25,6 +25,27 @@ HTTPS Receiver, SOAP Receiver, OData Receiver, SFTP Receiver, IDoc Receiver, Mai
 JMS Receiver, Content Modifier, Router, Splitter, Aggregator, Filter, Message Mapping,
 XML Validator, Groovy Script, Exception Subprocess.
 
+SENDER vs RECEIVER ADAPTERS — the adapter is named after the EXTERNAL system's ROLE
+(NOT after the iFlow, and NOT after the direction of the data-flow arrow).
+
+| External system's role                     | Adapter type | Position in iFlow |
+|--------------------------------------------|--------------|-------------------|
+| External system SENDS a request to iFlow   | "X Sender"   | START (the entry / trigger) |
+| External system RECEIVES a request from iFlow | "X Receiver" | END   (a destination)        |
+
+Worked example for a flow with an HTTPS entry point and an HTTPS callout:
+- An external client POSTs JSON to the iFlow's URL.
+  → That EXTERNAL CLIENT is sending. Use "HTTPS Sender" at the START of the flow.
+- The iFlow then POSTs JSON to a downstream service (e.g. Salesforce, an internal API).
+  → That EXTERNAL SERVICE is receiving. Use "HTTPS Receiver" at the END of the flow.
+
+Hard rules — violations are rejected:
+- A flow MUST start with Sender adapter(s) and never have Sender adapters anywhere else.
+- Every outbound call from the iFlow MUST use a Receiver adapter (HTTPS Receiver, SOAP Receiver,
+  OData Receiver, SFTP Receiver, IDoc Receiver, Mail Receiver, JMS Receiver).
+- WRONG: typing an outbound HTTPS call to Salesforce/REST as "HTTPS Sender".
+  RIGHT: such outbound calls are "HTTPS Receiver".
+
 Return ONE JSON object matching this exact schema (no prose, no markdown):
 {output_schema_json}
 
@@ -36,7 +57,18 @@ RETRIEVED CHUNKS:
 {retrieved_chunks}
 
 USER REQUIREMENT:
-{user_prompt}"""
+{user_prompt}
+
+FINAL CHECK BEFORE YOU EMIT THE JSON — re-read these and revise your draft accordingly:
+1. Adapter direction: every component at the START of a branch must end in "Sender"
+   (HTTPS Sender, SFTP Sender, SOAP Sender, OData Sender, IDoc Sender, Mail Sender).
+   Every component that the iFlow CALLS OUT to (any destination, any outbound API/URL/file/queue)
+   must end in "Receiver" (HTTPS Receiver, SOAP Receiver, OData Receiver, SFTP Receiver,
+   IDoc Receiver, Mail Receiver, JMS Receiver). The user may colloquially call destinations
+   "receivers" — that matches "Receiver" adapters, NOT "Sender" adapters. If the user says
+   "route to three receivers", those three destinations are "<protocol> Receiver" components.
+2. Every component carries a non-empty `citations` array taken verbatim from a chunk header above.
+3. The output is ONE JSON object — no prose, no markdown fences."""
 
 
 def _output_schema_json() -> str:
