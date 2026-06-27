@@ -64,14 +64,19 @@ async def test_get_flow_404(patched_app):
     assert resp.status_code == 404
 
 
-async def test_export_xml_returns_501(patched_app, fake_flows):
+async def test_export_xml_streams_iflw_bpmn(patched_app, fake_flows):
     fake_flows.docs["flow-001"] = _seed_doc(1)
 
     transport = ASGITransport(app=patched_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/v1/iflow/flow-001/export?format=xml")
 
-    assert resp.status_code == 501
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/xml")
+    assert resp.headers["content-disposition"].endswith('.iflw"')
+    body = resp.content.decode("utf-8")
+    assert "bpmn2:definitions" in body
+    assert "bpmn2:process" in body
 
 
 async def test_export_pdf_streams_pdf(patched_app, fake_flows):

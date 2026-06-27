@@ -173,6 +173,71 @@ async def test_generate_retries_once_then_422(patched_app, patch_generator):
     assert fake.chat.completions.calls == 2
 
 
+async def test_generate_download_xml_streams_iflw_with_flow_id_header(patched_app, patch_generator, fake_flows):
+    fake = patch_generator([json.dumps(VALID_IFLOW)])
+
+    transport = ASGITransport(app=patched_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/v1/iflow/generate-download?format=xml",
+            json={"prompt": "Build a customer sync from S/4HANA to Salesforce"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/xml")
+    assert resp.headers["content-disposition"].endswith('.iflw"')
+    flow_id = resp.headers["x-flow-id"]
+    assert flow_id and flow_id in fake_flows.docs  # persisted before streaming
+    body = resp.content.decode("utf-8")
+    assert "bpmn2:definitions" in body
+    assert "bpmn2:process" in body
+    assert fake.chat.completions.calls == 1
+
+
+async def test_generate_download_defaults_to_xml(patched_app, patch_generator, fake_flows):
+    patch_generator([json.dumps(VALID_IFLOW)])
+    transport = ASGITransport(app=patched_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/v1/iflow/generate-download",
+            json={"prompt": "Build a customer sync from S/4HANA to Salesforce"},
+        )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/xml")
+
+
+async def test_generate_download_json_streams_json_attachment(patched_app, patch_generator, fake_flows):
+    patch_generator([json.dumps(VALID_IFLOW)])
+    transport = ASGITransport(app=patched_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/v1/iflow/generate-download?format=json",
+            json={"prompt": "Build a customer sync from S/4HANA to Salesforce"},
+        )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.headers["content-disposition"].endswith('.json"')
+    body = json.loads(resp.content)
+    assert body["flow"]["flow_name"] == "Customer Sync"
+
+
+async def test_generate_download_propagates_generator_error_as_422(patched_app, patch_generator):
+    broken = dict(VALID_IFLOW)
+    broken["components"] = [
+        {"id": "x", "type": "Telepathy Sender", "config": {}, "purpose": "fake",
+         "citations": [CITATION]}
+    ]
+    patch_generator([json.dumps(broken), json.dumps(broken)])
+
+    transport = ASGITransport(app=patched_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/v1/iflow/generate-download?format=xml",
+            json={"prompt": "A valid prompt that is long enough to pass the length check."},
+        )
+    assert resp.status_code == 422
+
+
 async def test_generate_retries_succeeds_on_second_attempt(patched_app, patch_generator):
     bad_payload = json.dumps({"flow_name": "incomplete"})
     fake = patch_generator([bad_payload, json.dumps(VALID_IFLOW)])

@@ -26,6 +26,7 @@ from ..schemas.validation import (
 )
 from ..services.error_fixer import fix_xml as run_fixer
 from ..services.iflow_generator import GeneratorError, generate as run_generate
+from ..services.iflw_xml import build_iflw_xml
 from ..services.limiter import limiter
 from ..services.pdf import stream_pdf
 from ..services.xsd_validator import validate_three_level
@@ -48,40 +49,117 @@ def _record_to_history_item(doc: dict) -> HistoryItem:
     )
 
 
+def _generator_error_http(exc: GeneratorError) -> HTTPException:
+    report = exc.validator
+    body = {
+        "message": str(exc),
+        "attempts": exc.attempts,
+        "last_error": exc.last_error,
+        "issues": [
+            {"field": i.field, "code": i.code, "message": i.message, "offender": i.offender}
+            for i in (report.issues if report else [])
+        ],
+    }
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=body)
+
+
+async def _persist_generated(prompt: str, result) -> str:
+    iflow = result.iflow
+    flow_id = str(uuid.uuid4())
+    now = _now()
+    await flows_collection().insert_one({
+        "_id": flow_id,
+        "name": iflow.flow_name,
+        "tags": [],
+        "prompt": prompt,
+        "flow": iflow.model_dump(by_alias=True),
+        "retrieved_chunks": [c.to_dict() for c in result.chunks],
+        "attempts": result.attempts,
+        "created_at": now,
+        "updated_at": now,
+    })
+    return flow_id
+
+
+def _generated_export_response(flow_id: str, iflow: IFlow, format: str, *, prompt: str) -> Response:
+    """Build a file-download Response for a freshly generated flow.
+
+    Used only by the one-call generate-download endpoint; the regular GET export
+    route loads timestamps from Mongo and keeps its own (slightly different)
+    response shape.
+    """
+    if format == "xml":
+        return Response(
+            content=build_iflw_xml(iflow),
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="iflow-{flow_id}.iflw"',
+                "X-Flow-Id": flow_id,
+            },
+        )
+
+    now_iso = _now().isoformat()
+    flow_record = {
+        "flow_id": flow_id,
+        "name": iflow.flow_name,
+        "tags": [],
+        "prompt": prompt,
+        "flow": iflow.model_dump(by_alias=True),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    if format == "pdf":
+        return StreamingResponse(
+            stream_pdf(flow_record),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="iflow-{flow_id}.pdf"',
+                "X-Flow-Id": flow_id,
+            },
+        )
+
+    return Response(
+        content=json.dumps(flow_record, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="iflow-{flow_id}.json"',
+            "X-Flow-Id": flow_id,
+        },
+    )
+
+
 @router.post("/generate", response_model=GenerateOut, status_code=status.HTTP_200_OK)
 @limiter.limit(f"{get_settings().rate_limit_generations_per_minute}/minute")
 async def generate(request: Request, payload: GenerateIn) -> GenerateOut:
     try:
         result = await run_generate(payload.prompt)
     except GeneratorError as exc:
-        report = exc.validator
-        body = {
-            "message": str(exc),
-            "attempts": exc.attempts,
-            "last_error": exc.last_error,
-            "issues": [
-                {"field": i.field, "code": i.code, "message": i.message, "offender": i.offender}
-                for i in (report.issues if report else [])
-            ],
-        }
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=body) from exc
+        raise _generator_error_http(exc) from exc
 
-    iflow = result.iflow
-    flow_id = str(uuid.uuid4())
-    now = _now()
-    doc = {
-        "_id": flow_id,
-        "name": iflow.flow_name,
-        "tags": [],
-        "prompt": payload.prompt,
-        "flow": iflow.model_dump(by_alias=True),
-        "retrieved_chunks": [c.to_dict() for c in result.chunks],
-        "attempts": result.attempts,
-        "created_at": now,
-        "updated_at": now,
-    }
-    await flows_collection().insert_one(doc)
-    return GenerateOut(flow_id=flow_id, flow=iflow)
+    flow_id = await _persist_generated(payload.prompt, result)
+    return GenerateOut(flow_id=flow_id, flow=result.iflow)
+
+
+@router.post("/generate-download")
+@limiter.limit(f"{get_settings().rate_limit_generations_per_minute}/minute")
+async def generate_download(
+    request: Request,
+    payload: GenerateIn,
+    format: Literal["json", "pdf", "xml"] = Query("xml"),
+) -> Response:
+    """Generate a flow and stream the export back as a downloadable file in one call.
+
+    The persisted `flow_id` is returned in the `X-Flow-Id` response header so the
+    caller can later fetch, save, tag, or re-export the same flow via the regular
+    `/iflow/{flow_id}` endpoints.
+    """
+    try:
+        result = await run_generate(payload.prompt)
+    except GeneratorError as exc:
+        raise _generator_error_http(exc) from exc
+
+    flow_id = await _persist_generated(payload.prompt, result)
+    return _generated_export_response(flow_id, result.iflow, format, prompt=payload.prompt)
 
 
 @router.post("/save", response_model=HistoryItem)
@@ -168,22 +246,27 @@ async def export_flow(
     flow_id: str,
     format: Literal["json", "pdf", "xml"] = Query("json"),
 ) -> Response:
-    if format == "xml":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="XML export is not implemented in Phase 2.",
-        )
-
     doc = await flows_collection().find_one({"_id": flow_id})
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found.")
+
+    iflow_obj = IFlow.model_validate(doc["flow"])
+
+    if format == "xml":
+        xml_bytes = build_iflw_xml(iflow_obj)
+        filename = f"iflow-{flow_id}.iflw"
+        return Response(
+            content=xml_bytes,
+            media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     flow_record = {
         "flow_id": doc["_id"],
         "name": doc.get("name", ""),
         "tags": doc.get("tags", []),
         "prompt": doc.get("prompt", ""),
-        "flow": IFlow.model_validate(doc["flow"]).model_dump(by_alias=True),
+        "flow": iflow_obj.model_dump(by_alias=True),
         "created_at": doc["created_at"].isoformat(),
         "updated_at": doc["updated_at"].isoformat(),
     }
