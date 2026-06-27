@@ -26,6 +26,7 @@ from ..schemas.validation import (
 )
 from ..services.error_fixer import fix_xml as run_fixer
 from ..services.iflow_generator import GeneratorError, generate as run_generate
+from ..services.iflw_bundle import build_iflw_bundle
 from ..services.iflw_xml import build_iflw_xml
 from ..services.limiter import limiter
 from ..services.pdf import stream_pdf
@@ -98,6 +99,16 @@ def _generated_export_response(flow_id: str, iflow: IFlow, format: str, *, promp
             },
         )
 
+    if format == "zip":
+        return Response(
+            content=build_iflw_bundle(iflow, flow_id=flow_id),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="iflow-{flow_id}.zip"',
+                "X-Flow-Id": flow_id,
+            },
+        )
+
     now_iso = _now().isoformat()
     flow_record = {
         "flow_id": flow_id,
@@ -145,7 +156,7 @@ async def generate(request: Request, payload: GenerateIn) -> GenerateOut:
 async def generate_download(
     request: Request,
     payload: GenerateIn,
-    format: Literal["json", "pdf", "xml"] = Query("xml"),
+    format: Literal["json", "pdf", "xml", "zip"] = Query("zip"),
 ) -> Response:
     """Generate a flow and stream the export back as a downloadable file in one call.
 
@@ -244,7 +255,7 @@ async def get_flow(flow_id: str) -> dict:
 @router.get("/{flow_id}/export")
 async def export_flow(
     flow_id: str,
-    format: Literal["json", "pdf", "xml"] = Query("json"),
+    format: Literal["json", "pdf", "xml", "zip"] = Query("json"),
 ) -> Response:
     doc = await flows_collection().find_one({"_id": flow_id})
     if doc is None:
@@ -258,6 +269,15 @@ async def export_flow(
         return Response(
             content=xml_bytes,
             media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if format == "zip":
+        zip_bytes = build_iflw_bundle(iflow_obj, flow_id=flow_id)
+        filename = f"iflow-{flow_id}.zip"
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 

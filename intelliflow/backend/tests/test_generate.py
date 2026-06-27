@@ -194,7 +194,8 @@ async def test_generate_download_xml_streams_iflw_with_flow_id_header(patched_ap
     assert fake.chat.completions.calls == 1
 
 
-async def test_generate_download_defaults_to_xml(patched_app, patch_generator, fake_flows):
+async def test_generate_download_defaults_to_zip(patched_app, patch_generator, fake_flows):
+    """The CPI-importable bundle is the most useful default."""
     patch_generator([json.dumps(VALID_IFLOW)])
     transport = ASGITransport(app=patched_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -203,7 +204,14 @@ async def test_generate_download_defaults_to_xml(patched_app, patch_generator, f
             json={"prompt": "Build a customer sync from S/4HANA to Salesforce"},
         )
     assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("application/xml")
+    assert resp.headers["content-type"].startswith("application/zip")
+    assert resp.headers["content-disposition"].endswith('.zip"')
+    # Body is a valid zip containing both the manifest and the iflw.
+    import io as _io, zipfile as _zip
+    with _zip.ZipFile(_io.BytesIO(resp.content)) as z:
+        names = z.namelist()
+    assert "META-INF/MANIFEST.MF" in names
+    assert any(n.endswith(".iflw") for n in names)
 
 
 async def test_generate_download_json_streams_json_attachment(patched_app, patch_generator, fake_flows):
